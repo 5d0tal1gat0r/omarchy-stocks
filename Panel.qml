@@ -1116,7 +1116,7 @@ Panel {
                 { text: "EMA200", key: "ema200", width: 126, align: Text.AlignRight },
                 { text: "MACD", key: "macd", width: 56, align: Text.AlignRight },
                 { text: "RSI", key: "rsi", width: 56, align: Text.AlignRight },
-                { text: "Analysts · Δ", key: "targetUpsidePct", width: 190, align: Text.AlignRight }
+                { text: "Analysts", key: "targetUpsidePct", width: 190, align: Text.AlignRight }
               ]
 
               Item {
@@ -1124,6 +1124,7 @@ Panel {
                 required property int index
                 width: index === 5 ? screenHeader.width - Style.space(393) : Style.space(modelData.width)
                 height: headerText.implicitHeight
+                clip: true
 
                 Text {
                   id: headerText
@@ -1131,6 +1132,7 @@ Panel {
                   text: parent.modelData.text + (root.screenSortKey === parent.modelData.key
                     ? (root.screenSortDirection > 0 ? " ▲" : " ▼") : "")
                   horizontalAlignment: parent.modelData.align
+                  elide: Text.ElideRight
                   color: headerMouse.containsMouse ? root.barForeground : root.mutedForeground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
