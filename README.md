@@ -33,6 +33,7 @@ omarchy bar move io.github.5d0tal1gat0r.stocks --section right
 | panel | click a row | show that symbol's chart and stats |
 | panel | `Open on TradingView ↗` | open the selected symbol in your browser |
 | panel | `Screen` | show every S&P 500 stock above a rising EMA200 with >20% consensus target upside |
+| screen | `SYMBOL(market cap)` | show the rounded market cap beside each symbol, e.g. `NVDA(4T)` |
 | screen | click a symbol | open that symbol on TradingView |
 | screen | `Refresh` | force a new full-index scan now |
 

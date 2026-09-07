@@ -1111,7 +1111,7 @@ Panel {
 
             Repeater {
               model: [
-                { text: "Symbol", key: "symbol", width: 50, align: Text.AlignLeft },
+                { text: "Symbol", key: "symbol", width: 85, align: Text.AlignLeft },
                 { text: "Price", key: "price", width: 70, align: Text.AlignRight },
                 { text: "EMA200", key: "ema200", width: 126, align: Text.AlignRight },
                 { text: "MACD", key: "macd", width: 56, align: Text.AlignRight },
@@ -1122,7 +1122,7 @@ Panel {
               Item {
                 required property var modelData
                 required property int index
-                width: index === 5 ? screenHeader.width - Style.space(358) : Style.space(modelData.width)
+                width: index === 5 ? screenHeader.width - Style.space(393) : Style.space(modelData.width)
                 height: headerText.implicitHeight
 
                 Text {
@@ -1190,8 +1190,8 @@ Panel {
                   spacing: 0
 
                   Text {
-                    width: Style.space(50)
-                    text: screenRow.modelData.symbol
+                    width: Style.space(85)
+                    text: Model.screenSymbolLabel(screenRow.modelData)
                     color: root.barForeground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -1233,7 +1233,7 @@ Panel {
                     font.bold: screenRow.modelData.rsi.action !== "Neutral"
                   }
                   Text {
-                    width: screenValues.width - Style.space(358)
+                    width: screenValues.width - Style.space(393)
                     text: screenRow.modelData.analystCount + " · "
                       + Model.formatSignedPercent(screenRow.modelData.targetUpsidePct)
                     horizontalAlignment: Text.AlignRight

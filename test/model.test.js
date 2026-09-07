@@ -212,11 +212,12 @@ test("S&P screen: dynamic rows preserve every supplied passing stock", () => {
 
 test("screenRows: uses MACD and RSI returned by the daily scanner", () => {
   const stocks = [{ symbol: "AAA", price: 130, ema200: 100, ema20d: 99, ema5y: 50,
-    target: 170, buy: 4, hold: 1, sell: 0,
+    target: 170, marketCap: 4.28e12, buy: 4, hold: 1, sell: 0,
     macd: { value: 2, signal: 1, action: "Buy" }, rsi: { value: 75, action: "Sell" } }]
   const row = Model.screenRows(stocks, [])[0]
   assert.equal(row.macd.action, "Buy")
   assert.equal(row.rsi.action, "Sell")
+  assert.equal(row.marketCap, 4.28e12)
 })
 
 test("screenRows: live price updates price-sensitive checks and matches by symbol", () => {
@@ -311,6 +312,12 @@ test("barLabel: full, compact, error, no-change", () => {
   assert.equal(Model.barLabel(quote("X", 5, null), false), "X 5.00")
   assert.equal(Model.barLabel(quote("NOPE", null, null, "Not Found"), false), "NOPE !")
   assert.equal(Model.barLabel(null, false), "")
+})
+
+test("screenSymbolLabel: puts a rounded market cap directly after the symbol", () => {
+  assert.equal(Model.screenSymbolLabel({ symbol: "NVDA", marketCap: 4.28e12 }), "NVDA(4T)")
+  assert.equal(Model.formatMarketCap(4.28e12), "4T")
+  assert.equal(Model.formatMarketCap(null), "")
 })
 
 test("verticalLabel / loadingLabel", () => {

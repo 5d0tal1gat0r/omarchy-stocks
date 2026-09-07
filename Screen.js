@@ -34,7 +34,7 @@ function readCache(file = cachePath()) {
 
 function cacheIsFresh(cache, now = new Date()) {
   const coverage = cache && cache.coverage
-  return Boolean(cache && cache.dateKey === localDateKey(now) && Array.isArray(cache.stocks)
+  return Boolean(cache && cache.schemaVersion === 2 && cache.dateKey === localDateKey(now) && Array.isArray(cache.stocks)
     && !cache.error && !cache.warning
     && (!coverage || (!coverage.historyErrors && !coverage.analystErrors)))
 }
@@ -231,15 +231,19 @@ async function createYahooSession() {
 
 async function fetchAnalysts(stock, session) {
   const url = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
-    + `${encodeURIComponent(stock.symbol)}?modules=financialData&crumb=${encodeURIComponent(session.crumb)}`
+    + `${encodeURIComponent(stock.symbol)}?modules=financialData,price&crumb=${encodeURIComponent(session.crumb)}`
   const data = await fetchJson(url, 3, { cookie: session.cookie })
   const financial = data && data.quoteSummary && data.quoteSummary.result && data.quoteSummary.result[0]
     && data.quoteSummary.result[0].financialData
+  const priceData = data && data.quoteSummary && data.quoteSummary.result && data.quoteSummary.result[0]
+    && data.quoteSummary.result[0].price
   if (!financial) return { unavailable: true }
   const target = Number(financial.targetMeanPrice && financial.targetMeanPrice.raw)
   const analystCount = Number(financial.numberOfAnalystOpinions && financial.numberOfAnalystOpinions.raw)
   if (!Number.isFinite(target)) return { unavailable: true }
+  const marketCap = Number(priceData && priceData.marketCap && priceData.marketCap.raw)
   return { ...stock, target, analystCount: Number.isFinite(analystCount) ? analystCount : 0,
+    marketCap: Number.isFinite(marketCap) ? marketCap : null,
     targetUpsidePct: (target / stock.price - 1) * 100 }
 }
 
@@ -271,7 +275,7 @@ async function runScreen() {
     })
   const asOf = validHistories.map(stock => stock.asOf).sort().at(-1) || localDateKey()
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     dateKey: localDateKey(),
     generatedAt: new Date().toISOString(),
     asOf,

@@ -446,6 +446,7 @@ function screenRows(stocks, quotes, indicators) {
     out.push({
       symbol: symbol,
       name: String(stock.name || symbol),
+      marketCap: toNumber(stock.marketCap),
       price: price,
       ema200: ema200,
       target: target,
@@ -550,6 +551,15 @@ function formatChange(quote) {
   return arrowFor(change) + " " + signed + (pct ? " (" + pct + ")" : "")
 }
 
+function formatMarketCap(value) {
+  var n = toNumber(value)
+  if (n === null || n < 0) return ""
+  if (n >= 1000000000000) return Math.round(n / 1000000000000) + "T"
+  if (n >= 1000000000) return Math.round(n / 1000000000) + "B"
+  if (n >= 1000000) return Math.round(n / 1000000) + "M"
+  return Math.round(n / 1000) + "K"
+}
+
 // Bar pill text: "AMZN 226.13 ▲0.42%", or "AMZN ▲0.42%" when compact.
 function barLabel(quote, compact) {
   if (!quote) return ""
@@ -647,6 +657,12 @@ function tapeItems(quotes, compact) {
     })
   }
   return out
+}
+
+function screenSymbolLabel(row) {
+  var symbol = String(row && row.symbol || "")
+  var cap = formatMarketCap(row && row.marketCap)
+  return symbol + (cap ? "(" + cap + ")" : "")
 }
 
 // ---- Colors. Omarchy themes expose their palette in
@@ -847,6 +863,7 @@ if (typeof module !== "undefined") {
     formatPrice: formatPrice,
     formatSignedPercent: formatSignedPercent,
     formatChange: formatChange,
+    formatMarketCap: formatMarketCap,
     barLabel: barLabel,
     verticalLabel: verticalLabel,
     loadingLabel: loadingLabel,
@@ -861,6 +878,7 @@ if (typeof module !== "undefined") {
     seriesPoints: seriesPoints,
     valueToY: valueToY,
     tapeItems: tapeItems,
+    screenSymbolLabel: screenSymbolLabel,
     normalizeColor: normalizeColor,
     parseThemeColor: parseThemeColor,
     formatVolume: formatVolume,
