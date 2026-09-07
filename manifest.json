@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "id": "io.github.5d0tal1gat0r.stocks",
   "name": "Stocks",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": "5d0tal1gat0r",
   "license": "MIT",
-  "description": "Stock ticker pill with a quotes panel for the Omarchy bar (Yahoo Finance, no API key).",
+  "description": "Stock ticker and S&P 500 momentum/analyst-upside screen for the Omarchy bar.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Stocks",
-    "description": "Cycling stock ticker with a quotes panel",
+    "description": "Cycling stock ticker with quotes and a screened-stock tab",
     "category": "Info",
     "allowMultiple": false,
     "defaultSection": "center"

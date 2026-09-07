@@ -3,7 +3,7 @@
 // node test-suite through require(), so it stays ES5-style and ends with a
 // module.exports guard (same convention as omarchy.weather's Model.js).
 
-var DEFAULT_SYMBOLS = ["AAPL", "NVDA", "SPCX", "GOOGL"]
+var DEFAULT_SYMBOLS = ["AMZN", "NVDA", "SPCX", "GOOGL"]
 
 function trimString(value) {
   return String(value === undefined || value === null ? "" : value).replace(/^\s+|\s+$/g, "")
@@ -47,7 +47,6 @@ function cycleSeconds(value, fallback) {
 }
 
 var CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
-var QUOTE_PAGE_URL = "https://finance.yahoo.com/quote/"
 
 // Panel chart ranges and the Yahoo bar interval that keeps each one at a
 // sensible point count (79 / 131 / 21 / 125 / 53 points respectively).
@@ -96,8 +95,27 @@ function curlCommand(symbols, userAgent, range) {
   return cmd
 }
 
-function quoteUrl(symbol) {
-  return QUOTE_PAGE_URL + encodeURIComponent(String(symbol))
+function longTermChartUrl(symbol) {
+  return CHART_URL + encodeURIComponent(String(symbol)) + "?range=5y&interval=1wk"
+}
+
+function longTermIndicatorCommand(symbols, userAgent) {
+  var cmd = ["curl", "-sS", "--max-time", "10", "-A", String(userAgent || "omarchy-stocks"), "-w", "\n"]
+  for (var i = 0; i < symbols.length; i++) cmd.push(longTermChartUrl(symbols[i]))
+  return cmd
+}
+
+function tradingViewSymbol(symbol) {
+  var value = trimString(symbol).toUpperCase()
+  var aliases = { "^GSPC": "SPX", "^DJI": "DJI", "BRK-B": "BRK.B", "BF-B": "BF.B" }
+  if (aliases[value]) return aliases[value]
+  // Yahoo uses '-' in crypto pairs and '=X' in FX pairs; TradingView's
+  // generic symbol pages use the compact form (BTCUSD, EURUSD).
+  return value.replace(/=X$/, "").replace(/[^A-Z0-9.]/g, "")
+}
+
+function tradingViewUrl(symbol) {
+  return "https://www.tradingview.com/symbols/" + encodeURIComponent(tradingViewSymbol(symbol)) + "/"
 }
 
 function shellQuote(text) {
@@ -298,6 +316,197 @@ function shouldRetry(quotes) {
   return false
 }
 
+function screenSymbols(stocks) {
+  var list = stocks || []
+  var out = []
+  for (var i = 0; i < list.length; i++) out.push(String(list[i].symbol || "").toUpperCase())
+  return out
+}
+
+// Long-term technical signals use five years of weekly closes. MACD compares
+// its 12/26-week line with the 9-week signal line; RSI uses the standard
+// 14-week Wilder calculation and 30/70 thresholds.
+function exponentialMovingAverage(values, period) {
+  var list = values || []
+  var out = []
+  var multiplier = 2 / (period + 1)
+  var previous = null
+  for (var i = 0; i < list.length; i++) {
+    var value = toNumber(list[i])
+    if (value === null) continue
+    previous = previous === null ? value : (value - previous) * multiplier + previous
+    out.push(previous)
+  }
+  return out
+}
+
+function seriesCloses(series) {
+  var list = series || []
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var close = toNumber(list[i] && list[i].c)
+    if (close !== null) out.push(close)
+  }
+  return out
+}
+
+function macdIndicator(series) {
+  var closes = seriesCloses(series)
+  if (closes.length < 35) return { value: null, signal: null, action: "Neutral" }
+  var fast = exponentialMovingAverage(closes, 12)
+  var slow = exponentialMovingAverage(closes, 26)
+  var line = []
+  for (var i = 0; i < closes.length; i++) line.push(fast[i] - slow[i])
+  var signalLine = exponentialMovingAverage(line, 9)
+  var value = line[line.length - 1]
+  var signal = signalLine[signalLine.length - 1]
+  return {
+    value: value,
+    signal: signal,
+    action: value > signal ? "Buy" : (value < signal ? "Sell" : "Neutral")
+  }
+}
+
+function rsiIndicator(series) {
+  var closes = seriesCloses(series)
+  var period = 14
+  if (closes.length < period + 1) return { value: null, action: "Neutral" }
+  var gains = 0
+  var losses = 0
+  for (var i = 1; i <= period; i++) {
+    var initialChange = closes[i] - closes[i - 1]
+    if (initialChange > 0) gains += initialChange
+    else losses -= initialChange
+  }
+  var averageGain = gains / period
+  var averageLoss = losses / period
+  for (var j = period + 1; j < closes.length; j++) {
+    var change = closes[j] - closes[j - 1]
+    averageGain = (averageGain * (period - 1) + (change > 0 ? change : 0)) / period
+    averageLoss = (averageLoss * (period - 1) + (change < 0 ? -change : 0)) / period
+  }
+  var value
+  if (averageLoss === 0 && averageGain === 0) value = 50
+  else if (averageLoss === 0) value = 100
+  else {
+    var relativeStrength = averageGain / averageLoss
+    value = 100 - 100 / (1 + relativeStrength)
+  }
+  return { value: value, action: value <= 30 ? "Buy" : (value >= 70 ? "Sell" : "Neutral") }
+}
+
+function longTermIndicators(seriesBySymbol, symbols) {
+  var requested = symbols || []
+  var source = seriesBySymbol || {}
+  var out = {}
+  for (var i = 0; i < requested.length; i++) {
+    var symbol = String(requested[i]).toUpperCase()
+    out[symbol] = {
+      macd: macdIndicator(source[symbol] || []),
+      rsi: rsiIndicator(source[symbol] || [])
+    }
+  }
+  return out
+}
+
+// Normalize dynamic scanner output into the shape consumed by the QML table.
+// Optional live quotes remain supported for callers which want to revalue a
+// cached row, but the daily scanner normally supplies the current close.
+function screenRows(stocks, quotes, indicators) {
+  var list = stocks || []
+  var quoteList = quotes || []
+  var technical = indicators || {}
+  var bySymbol = {}
+  for (var q = 0; q < quoteList.length; q++) {
+    if (quoteList[q] && quoteList[q].symbol) bySymbol[String(quoteList[q].symbol).toUpperCase()] = quoteList[q]
+  }
+
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var stock = list[i]
+    var symbol = String(stock.symbol || "").toUpperCase()
+    var quote = bySymbol[symbol]
+    var live = isValid(quote)
+    var price = live ? toNumber(quote.price) : toNumber(stock.price)
+    var ema200 = toNumber(stock.ema200)
+    var ema20d = toNumber(stock.ema20d)
+    var ema5y = toNumber(stock.ema5y)
+    var target = toNumber(stock.target)
+    var aboveEmaPct = price !== null && ema200 ? (price / ema200 - 1) * 100 : null
+    var emaTrend20dPct = ema200 !== null && ema20d ? (ema200 / ema20d - 1) * 100 : null
+    var emaTrend5yPct = ema200 !== null && ema5y ? (ema200 / ema5y - 1) * 100 : null
+    var targetUpsidePct = target !== null && price ? (target / price - 1) * 100 : null
+    var aboveEma = aboveEmaPct !== null && aboveEmaPct > 0
+    var emaRising = emaTrend20dPct !== null && emaTrend20dPct > 0 && emaTrend5yPct !== null && emaTrend5yPct > 0
+    var targetUpside = targetUpsidePct !== null && targetUpsidePct > 20
+    var signals = technical[symbol] || stock || {}
+    var macd = signals.macd || { value: null, signal: null, action: "Neutral" }
+    var rsi = signals.rsi || { value: null, action: "Neutral" }
+
+    out.push({
+      symbol: symbol,
+      name: String(stock.name || symbol),
+      marketCap: toNumber(stock.marketCap),
+      price: price,
+      ema200: ema200,
+      target: target,
+      analystCount: toNumber(stock.analystCount) !== null ? toNumber(stock.analystCount)
+        : Number(stock.buy || 0) + Number(stock.hold || 0) + Number(stock.sell || 0),
+      aboveEmaPct: aboveEmaPct,
+      emaTrend20dPct: emaTrend20dPct,
+      emaTrend5yPct: emaTrend5yPct,
+      targetUpsidePct: targetUpsidePct,
+      macd: macd,
+      rsi: rsi,
+      aboveEma: aboveEma,
+      emaRising: emaRising,
+      targetUpside: targetUpside,
+      qualifies: aboveEma && emaRising && targetUpside,
+      live: live
+    })
+  }
+  return out
+}
+
+function screenActionRank(action) {
+  if (action === "Buy") return 2
+  if (action === "Neutral") return 1
+  return 0
+}
+
+function screenSortValue(row, key) {
+  if (!row) return null
+  if (key === "symbol") return String(row.symbol || "")
+  if (key === "ema200") return toNumber(row.aboveEmaPct)
+  if (key === "price" || key === "analystCount" || key === "targetUpsidePct")
+    return toNumber(row[key])
+  if (key === "macd") return screenActionRank(row.macd && row.macd.action)
+  if (key === "rsi") return screenActionRank(row.rsi && row.rsi.action)
+  return null
+}
+
+// Returns a sorted copy, leaving the scanner's default order untouched. Signal
+// columns group Buy, Neutral, then Sell when sorted ascending.
+function sortScreenRows(rows, key, direction) {
+  var list = (rows || []).slice()
+  if (!key) return list
+  var dir = direction < 0 ? -1 : 1
+  return list.map(function(row, index) { return { row: row, index: index } }).sort(function(a, b) {
+    var left = screenSortValue(a.row, key)
+    var right = screenSortValue(b.row, key)
+    var leftMissing = left === null || left === undefined
+    var rightMissing = right === null || right === undefined
+    if (leftMissing || rightMissing) {
+      if (leftMissing && rightMissing) return a.index - b.index
+      return leftMissing ? 1 : -1
+    }
+    var result
+    if (typeof left === "string") result = left < right ? -1 : (left > right ? 1 : 0)
+    else result = left < right ? -1 : (left > right ? 1 : 0)
+    return result === 0 ? a.index - b.index : result * dir
+  }).map(function(entry) { return entry.row })
+}
+
 function priceDecimals(price) {
   return Math.abs(price) < 1 ? 4 : 2
 }
@@ -325,6 +534,12 @@ function formatPercent(changePct) {
   return n === null ? "" : Math.abs(n).toFixed(2) + "%"
 }
 
+function formatSignedPercent(value) {
+  var n = toNumber(value)
+  if (n === null) return ""
+  return (n < 0 ? "-" : "+") + Math.abs(n).toFixed(1) + "%"
+}
+
 // "▲ +1.28 (0.42%)" for the panel's change column; "" when unknown.
 function formatChange(quote) {
   if (!quote) return ""
@@ -336,7 +551,16 @@ function formatChange(quote) {
   return arrowFor(change) + " " + signed + (pct ? " (" + pct + ")" : "")
 }
 
-// Bar pill text: "AAPL 305.59 ▲0.42%", or "AAPL ▲0.42%" when compact.
+function formatMarketCap(value) {
+  var n = toNumber(value)
+  if (n === null || n < 0) return ""
+  if (n >= 1000000000000) return Math.round(n / 1000000000000) + "T"
+  if (n >= 1000000000) return Math.round(n / 1000000000) + "B"
+  if (n >= 1000000) return Math.round(n / 1000000) + "M"
+  return Math.round(n / 1000) + "K"
+}
+
+// Bar pill text: "AMZN 226.13 ▲0.42%", or "AMZN ▲0.42%" when compact.
 function barLabel(quote, compact) {
   if (!quote) return ""
   var symbol = String(quote.symbol || "")
@@ -433,6 +657,12 @@ function tapeItems(quotes, compact) {
     })
   }
   return out
+}
+
+function screenSymbolLabel(row) {
+  var symbol = String(row && row.symbol || "")
+  var cap = formatMarketCap(row && row.marketCap)
+  return symbol + (cap ? "(" + cap + ")" : "")
 }
 
 // ---- Colors. Omarchy themes expose their palette in
@@ -608,7 +838,10 @@ if (typeof module !== "undefined") {
     cycleSeconds: cycleSeconds,
     chartUrl: chartUrl,
     curlCommand: curlCommand,
-    quoteUrl: quoteUrl,
+    longTermChartUrl: longTermChartUrl,
+    longTermIndicatorCommand: longTermIndicatorCommand,
+    tradingViewSymbol: tradingViewSymbol,
+    tradingViewUrl: tradingViewUrl,
     shellQuote: shellQuote,
     emptyQuote: emptyQuote,
     parseChartResponse: parseChartResponse,
@@ -620,8 +853,17 @@ if (typeof module !== "undefined") {
     firstValidIndex: firstValidIndex,
     nextIndex: nextIndex,
     shouldRetry: shouldRetry,
+    screenSymbols: screenSymbols,
+    exponentialMovingAverage: exponentialMovingAverage,
+    macdIndicator: macdIndicator,
+    rsiIndicator: rsiIndicator,
+    longTermIndicators: longTermIndicators,
+    screenRows: screenRows,
+    sortScreenRows: sortScreenRows,
     formatPrice: formatPrice,
+    formatSignedPercent: formatSignedPercent,
     formatChange: formatChange,
+    formatMarketCap: formatMarketCap,
     barLabel: barLabel,
     verticalLabel: verticalLabel,
     loadingLabel: loadingLabel,
@@ -636,6 +878,7 @@ if (typeof module !== "undefined") {
     seriesPoints: seriesPoints,
     valueToY: valueToY,
     tapeItems: tapeItems,
+    screenSymbolLabel: screenSymbolLabel,
     normalizeColor: normalizeColor,
     parseThemeColor: parseThemeColor,
     formatVolume: formatVolume,
