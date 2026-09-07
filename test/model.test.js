@@ -72,8 +72,18 @@ test("curlCommand: one curl, one URL per symbol, newline write-out, custom UA", 
   assert.deepEqual(Model.curlCommand(["AAPL"], "ua", "6mo").slice(8), [Model.chartUrl("AAPL", "6mo")])
 })
 
-test("quoteUrl / shellQuote", () => {
-  assert.equal(Model.quoteUrl("BTC-USD"), "https://finance.yahoo.com/quote/BTC-USD")
+test("longTermIndicatorCommand: requests five years of weekly closes", () => {
+  assert.equal(Model.longTermChartUrl("^GSPC"), "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=5y&interval=1wk")
+  assert.deepEqual(Model.longTermIndicatorCommand(["AAPL", "NVDA"], "ua").slice(8), [
+    Model.longTermChartUrl("AAPL"), Model.longTermChartUrl("NVDA")
+  ])
+})
+
+test("tradingViewSymbol / tradingViewUrl / shellQuote", () => {
+  assert.equal(Model.tradingViewSymbol("BTC-USD"), "BTCUSD")
+  assert.equal(Model.tradingViewSymbol("EURUSD=X"), "EURUSD")
+  assert.equal(Model.tradingViewSymbol("^GSPC"), "SPX")
+  assert.equal(Model.tradingViewUrl("BTC-USD"), "https://www.tradingview.com/symbols/BTCUSD/")
   assert.equal(Model.shellQuote("it's"), "'it'\\''s'")
 })
 
@@ -181,6 +191,96 @@ test("shouldRetry: only when some failure is not a plain 'Not Found'", () => {
   assert.equal(Model.shouldRetry([quote("A", null, null, "Not Found"), quote("B", null, null, "No data")]), true)
   assert.equal(Model.shouldRetry([quote("A", null, null, "Bad response")]), true)
   assert.equal(Model.shouldRetry([]), true)
+})
+
+test("S&P screen: dynamic rows preserve every supplied passing stock", () => {
+  const stocks = [
+    { symbol: "AAA", price: 130, ema200: 100, ema20d: 99, ema5y: 50, target: 170, buy: 4, hold: 1, sell: 0 },
+    { symbol: "BBB", price: 240, ema200: 200, ema20d: 190, ema5y: 80, target: 300, buy: 7, hold: 2, sell: 1 }
+  ]
+  assert.deepEqual(Model.screenSymbols(stocks), ["AAA", "BBB"])
+  assert.deepEqual(Model.screenSymbols(), [])
+  const rows = Model.screenRows(stocks, [])
+  assert.equal(rows.length, stocks.length)
+  assert.ok(rows.every(row => row.aboveEma))
+  assert.ok(rows.every(row => row.emaRising))
+  assert.ok(rows.every(row => row.targetUpside))
+  assert.ok(rows.every(row => row.qualifies))
+  assert.ok(rows.every(row => row.analystCount > 0))
+  assert.ok(rows.every(row => row.live === false))
+})
+
+test("screenRows: uses MACD and RSI returned by the daily scanner", () => {
+  const stocks = [{ symbol: "AAA", price: 130, ema200: 100, ema20d: 99, ema5y: 50,
+    target: 170, buy: 4, hold: 1, sell: 0,
+    macd: { value: 2, signal: 1, action: "Buy" }, rsi: { value: 75, action: "Sell" } }]
+  const row = Model.screenRows(stocks, [])[0]
+  assert.equal(row.macd.action, "Buy")
+  assert.equal(row.rsi.action, "Sell")
+})
+
+test("screenRows: live price updates price-sensitive checks and matches by symbol", () => {
+  const stocks = [{ symbol: "AAA", name: "A", price: 120, ema200: 100, ema20d: 99, ema5y: 50,
+    target: 150, buy: 4, hold: 1, sell: 0 }]
+  const live = quote("aaa", 130, 129)
+  const row = Model.screenRows(stocks, [live])[0]
+  assert.equal(row.price, 130)
+  assert.equal(row.live, true)
+  assert.ok(Math.abs(row.aboveEmaPct - 30) < 1e-8)
+  assert.ok(Math.abs(row.targetUpsidePct - 15.3846153846) < 1e-8)
+  assert.equal(row.targetUpside, false)
+  assert.equal(row.qualifies, false)
+  assert.equal(row.analystCount, 5)
+})
+
+test("sortScreenRows: sorts a copy by screen columns and keeps missing values last", () => {
+  const rows = [
+    { symbol: "BBB", price: 20, ema200: 10, analystCount: 3, targetUpsidePct: 5,
+      macd: { action: "Sell" }, rsi: { action: "Neutral" } },
+    { symbol: "AAA", price: 30, ema200: 20, analystCount: 8, targetUpsidePct: 25,
+      macd: { action: "Buy" }, rsi: { action: "Sell" } },
+    { symbol: "CCC", price: null, ema200: 15, analystCount: 1, targetUpsidePct: null,
+      macd: { action: "Neutral" }, rsi: { action: "Buy" } }
+  ]
+  assert.deepEqual(Model.sortScreenRows(rows, "symbol", 1).map(row => row.symbol), ["AAA", "BBB", "CCC"])
+  assert.deepEqual(Model.sortScreenRows(rows, "price", -1).map(row => row.symbol), ["AAA", "BBB", "CCC"])
+  assert.deepEqual(Model.sortScreenRows(rows, "macd", 1).map(row => row.symbol), ["BBB", "CCC", "AAA"])
+  assert.deepEqual(Model.sortScreenRows(rows, "rsi", -1).map(row => row.symbol), ["CCC", "BBB", "AAA"])
+  assert.deepEqual(rows.map(row => row.symbol), ["BBB", "AAA", "CCC"])
+})
+
+function weeklySeries(values) {
+  return values.map((c, i) => ({ t: i * 604800, c }))
+}
+
+test("long-term MACD and RSI: weekly Buy, Sell, and Neutral signals", () => {
+  const rising = weeklySeries(Array.from({ length: 60 }, (_, i) => 100 + i))
+  const falling = weeklySeries(Array.from({ length: 60 }, (_, i) => 200 - i))
+  const flat = weeklySeries(Array(60).fill(100))
+  assert.equal(Model.macdIndicator(rising).action, "Buy")
+  assert.equal(Model.macdIndicator(falling).action, "Sell")
+  assert.equal(Model.macdIndicator(flat).action, "Neutral")
+  assert.equal(Model.rsiIndicator(rising).action, "Sell")
+  assert.equal(Model.rsiIndicator(falling).action, "Buy")
+  assert.deepEqual(Model.rsiIndicator(flat), { value: 50, action: "Neutral" })
+  assert.deepEqual(Model.macdIndicator(weeklySeries(Array(34).fill(100))),
+    { value: null, signal: null, action: "Neutral" })
+})
+
+test("long-term indicators map five-year weekly series by screen symbol", () => {
+  const series = weeklySeries(Array.from({ length: 60 }, (_, i) => 50 + i))
+  const indicators = Model.longTermIndicators({ AAA: series }, ["AAA", "MISSING"])
+  assert.equal(indicators.AAA.macd.action, "Buy")
+  assert.equal(indicators.AAA.rsi.action, "Sell")
+  assert.deepEqual(indicators.MISSING.macd, { value: null, signal: null, action: "Neutral" })
+  assert.deepEqual(indicators.MISSING.rsi, { value: null, action: "Neutral" })
+})
+
+test("formatSignedPercent: sign, one decimal, missing value", () => {
+  assert.equal(Model.formatSignedPercent(12.34), "+12.3%")
+  assert.equal(Model.formatSignedPercent(-0.04), "-0.0%")
+  assert.equal(Model.formatSignedPercent(0), "+0.0%")
+  assert.equal(Model.formatSignedPercent(null), "")
 })
 
 test("formatPrice: 2 decimals, 4 below 1, thousands separators", () => {

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -39,6 +40,25 @@ Panel {
   property int retries: 0
   property int selectedIndex: 0
 
+  // ---- Dynamic screen state. Screen.js evaluates the current S&P 500 once
+  //      per day and returns every match from its on-disk cache.
+  property int activeTab: 0
+  property var screenStocks: []
+  property string screenFetchError: ""
+  property string screenFetchWarning: ""
+  property var screenLastUpdated: null
+  property string screenAsOf: ""
+  property var screenCoverage: ({})
+  property bool screenLoading: true
+  property bool screenLoaded: false
+  property string lastScreenNotification: ""
+  readonly property string screenScriptPath: (Quickshell.env("HOME") || "")
+    + "/.config/omarchy/plugins/" + moduleName + "/Screen.js"
+  property string screenSortKey: ""
+  property int screenSortDirection: 1
+  readonly property var screenRows: Model.screenRows(screenStocks, [], {})
+  readonly property var sortedScreenRows: Model.sortScreenRows(screenRows, screenSortKey, screenSortDirection)
+
   // ---- Chart-series cache for the active range when it is not 1d (the 1d
   //      series rides along with every quote fetch).
   property var chartSeries: ({})
@@ -52,7 +72,7 @@ Panel {
   property var ratesRequested: []
   property int ratesRetries: 0
 
-  readonly property string userAgent: "Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks/0.1.0"
+  readonly property string userAgent: "Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks/0.3.0"
   readonly property bool loading: quotes.length === 0 && fetchError === ""
   readonly property int validCount: Model.validCount(quotes)
   // Quotes as displayed: converted into the display currency when a rate is known.
@@ -83,6 +103,7 @@ Panel {
   property string themeRed: ""
   readonly property color upColor: upColorSetting !== "" ? upColorSetting : (themeGreen !== "" ? themeGreen : "#5fbf6f")
   readonly property color downColor: downColorSetting !== "" ? downColorSetting : (themeRed !== "" ? themeRed : urgentForeground)
+  readonly property color signalBuyColor: "#61afef"
 
   function trendColor(quote) {
     if (Model.isDown(quote)) return downColor
@@ -95,6 +116,21 @@ Panel {
     if (d < 0) return downColor
     if (d > 0) return upColor
     return barForeground
+  }
+
+  function signalColor(action) {
+    if (action === "Buy") return signalBuyColor
+    if (action === "Sell") return downColor
+    return mutedForeground
+  }
+
+  function sortScreen(key) {
+    if (screenSortKey === key) screenSortDirection = -screenSortDirection
+    else {
+      screenSortKey = key
+      screenSortDirection = key === "symbol" ? 1 : -1
+    }
+    screenList.contentY = 0
   }
 
   FileView {
@@ -171,6 +207,52 @@ Panel {
     ensureRates()
     // Fresh quotes deserve fresh charts, unless the cache is under a minute old.
     if (root.opened && Date.now() - chartFetchedAt > 60000) ensureChartSeries(true)
+  }
+
+  function notifyScreenProblem(message) {
+    var detail = String(message || "Screen data could not be updated")
+    if (detail === lastScreenNotification) return
+    lastScreenNotification = detail
+    screenNotifyProc.command = ["notify-send", "Stocks screen update failed", detail]
+    screenNotifyProc.running = true
+  }
+
+  function startScreenScan(force) {
+    if (screenProc.running) return
+    screenLoading = true
+    screenFetchError = ""
+    screenFetchWarning = ""
+    screenProc.command = force ? ["node", screenScriptPath, "--force"] : ["node", screenScriptPath]
+    screenProc.running = true
+  }
+
+  function handleScreenOutput(text) {
+    var raw = String(text || "")
+    if (raw.replace(/\s+/g, "") === "") {
+      screenLoading = false
+      screenFetchError = "The daily scanner returned no data"
+      notifyScreenProblem(screenFetchError)
+      return
+    }
+    var result
+    try { result = JSON.parse(raw) }
+    catch (error) {
+      screenLoading = false
+      screenFetchError = "Invalid response from the daily scanner"
+      notifyScreenProblem(screenFetchError)
+      return
+    }
+    screenLoading = false
+    screenLoaded = true
+    screenStocks = Array.isArray(result.stocks) ? result.stocks : []
+    screenAsOf = String(result.asOf || "")
+    screenCoverage = result.coverage || {}
+    screenLastUpdated = result.generatedAt ? new Date(result.generatedAt) : new Date()
+    screenFetchError = String(result.error || "")
+    screenFetchWarning = String(result.warning || "")
+    if (screenFetchError !== "") notifyScreenProblem(screenFetchError)
+    else if (screenFetchWarning !== "") notifyScreenProblem(screenFetchWarning)
+    else lastScreenNotification = ""
   }
 
   // ---- FX rates for the display currency: one pair per distinct quote
@@ -275,9 +357,9 @@ Panel {
     if (index >= 0 && index < quotes.length && Model.isValid(quotes[index])) selectedIndex = index
   }
 
-  function openQuotePage(symbol) {
+  function openTradingView(symbol) {
     if (root.bar && typeof root.bar.run === "function")
-      root.bar.run("xdg-open " + Model.shellQuote(Model.quoteUrl(symbol)))
+      root.bar.run("xdg-open " + Model.shellQuote(Model.tradingViewUrl(symbol)))
   }
 
   function rangeLabel(range) {
@@ -320,7 +402,10 @@ Panel {
 
   // Deferred so the first fetch sees the settings BarWidget injects right
   // after this component loads (Loader.onLoaded runs before callLater fires).
-  Component.onCompleted: Qt.callLater(root.startFetch)
+  Component.onCompleted: Qt.callLater(function() {
+    root.startFetch()
+    root.startScreenScan(false)
+  })
 
   Process {
     id: fetchProc
@@ -338,6 +423,16 @@ Panel {
       }
     }
   }
+
+  Process {
+    id: screenProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleScreenOutput(text)
+    }
+  }
+
+  Process { id: screenNotifyProc }
 
   Process {
     id: chartProc
@@ -373,6 +468,14 @@ Panel {
     running: true
     repeat: true
     onTriggered: root.refresh()
+  }
+
+  Timer {
+    id: screenRefreshTimer
+    interval: 24 * 60 * 60 * 1000
+    running: true
+    repeat: true
+    onTriggered: root.startScreenScan(false)
   }
 
   // Sparkline / chart line. Pure geometry comes from Model so the paint
@@ -441,7 +544,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(500))
+    // The screen table uses equal edge insets. The final analyst column flexes
+    // to consume the remaining usable card width.
+    contentWidth: panel.fittedContentWidth(Style.space(520))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -456,10 +561,10 @@ Panel {
         width: parent.width
         spacing: Style.space(8)
 
-        // ---- Header: title, range chips, freshness.
+        // ---- Header: tab switcher and freshness.
         Item {
           width: parent.width
-          height: Math.max(headerTitle.implicitHeight, chips.implicitHeight)
+          height: Math.max(headerTitle.implicitHeight, tabs.implicitHeight)
 
           Text {
             id: headerTitle
@@ -474,75 +579,43 @@ Panel {
           }
 
           Row {
-            id: chips
+            id: tabs
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
 
             Repeater {
-              model: Model.CHART_RANGES
+              model: ["Watchlist", "Screen"]
 
               Rectangle {
-                id: chip
+                id: tabChip
                 required property string modelData
-                readonly property bool selected: modelData === root.activeRange
-                width: chipText.implicitWidth + Style.space(12)
-                height: chipText.implicitHeight + Style.space(6)
+                required property int index
+                readonly property bool selected: index === root.activeTab
+                width: tabText.implicitWidth + Style.space(16)
+                height: tabText.implicitHeight + Style.space(7)
                 radius: Style.cornerRadius
-                color: chip.selected
+                color: tabChip.selected
                   ? Style.selectedFillFor(root.barForeground, Color.accent)
-                  : (chipMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
+                  : (tabMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
 
                 Text {
-                  id: chipText
+                  id: tabText
                   anchors.centerIn: parent
-                  text: root.rangeLabel(chip.modelData)
-                  color: chip.selected ? root.barForeground : root.mutedForeground
+                  text: tabChip.modelData
+                  color: tabChip.selected ? root.barForeground : root.mutedForeground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
-                  font.bold: chip.selected
+                  font.bold: tabChip.selected
                 }
 
                 MouseArea {
-                  id: chipMouse
+                  id: tabMouse
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.selectRange(chip.modelData)
+                  onClicked: root.activeTab = tabChip.index
                 }
-              }
-            }
-
-            Item { width: Style.space(8); height: 1 }
-
-            // Display currency: click cycles forward, right-click back.
-            Rectangle {
-              id: currencyChip
-              readonly property bool active: root.displayCurrency !== ""
-              width: currencyText.implicitWidth + Style.space(12)
-              height: currencyText.implicitHeight + Style.space(6)
-              radius: Style.cornerRadius
-              color: currencyChip.active
-                ? Style.selectedFillFor(root.barForeground, Color.accent)
-                : (currencyMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
-
-              Text {
-                id: currencyText
-                anchors.centerIn: parent
-                text: (root.displayCurrency !== "" ? root.displayCurrency : "Native") + " ⇄"
-                color: currencyChip.active ? root.barForeground : root.mutedForeground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: currencyChip.active
-              }
-
-              MouseArea {
-                id: currencyMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                cursorShape: Qt.PointingHandCursor
-                onClicked: function(mouse) { root.selectCurrency(mouse.button === Qt.RightButton ? -1 : 1) }
               }
             }
           }
@@ -551,12 +624,89 @@ Panel {
             anchors.right: parent.right
             anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
-            text: root.lastUpdated
-              ? "Updated " + Qt.formatTime(root.lastUpdated, "HH:mm")
-              : (root.loading ? "Loading…" : "")
+            text: {
+              var stamp = root.activeTab === 0 ? root.lastUpdated : root.screenLastUpdated
+              var busy = root.activeTab === 0 ? root.loading : root.screenLoading
+              return stamp ? "Updated " + Qt.formatTime(stamp, "HH:mm") : (busy ? "Loading…" : "")
+            }
             color: root.mutedForeground
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+          }
+        }
+
+        // Chart range and display currency only apply to the watchlist tab.
+        Row {
+          id: chips
+          visible: root.activeTab === 0
+          anchors.horizontalCenter: parent.horizontalCenter
+          spacing: Style.space(4)
+
+          Repeater {
+            model: Model.CHART_RANGES
+
+            Rectangle {
+              id: chip
+              required property string modelData
+              readonly property bool selected: modelData === root.activeRange
+              width: chipText.implicitWidth + Style.space(12)
+              height: chipText.implicitHeight + Style.space(6)
+              radius: Style.cornerRadius
+              color: chip.selected
+                ? Style.selectedFillFor(root.barForeground, Color.accent)
+                : (chipMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
+
+              Text {
+                id: chipText
+                anchors.centerIn: parent
+                text: root.rangeLabel(chip.modelData)
+                color: chip.selected ? root.barForeground : root.mutedForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: chip.selected
+              }
+
+              MouseArea {
+                id: chipMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.selectRange(chip.modelData)
+              }
+            }
+          }
+
+          Item { width: Style.space(8); height: 1 }
+
+          // Display currency: click cycles forward, right-click back.
+          Rectangle {
+            id: currencyChip
+            readonly property bool active: root.displayCurrency !== ""
+            width: currencyText.implicitWidth + Style.space(12)
+            height: currencyText.implicitHeight + Style.space(6)
+            radius: Style.cornerRadius
+            color: currencyChip.active
+              ? Style.selectedFillFor(root.barForeground, Color.accent)
+              : (currencyMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
+
+            Text {
+              id: currencyText
+              anchors.centerIn: parent
+              text: (root.displayCurrency !== "" ? root.displayCurrency : "Native") + " ⇄"
+              color: currencyChip.active ? root.barForeground : root.mutedForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: currencyChip.active
+            }
+
+            MouseArea {
+              id: currencyMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.LeftButton | Qt.RightButton
+              cursorShape: Qt.PointingHandCursor
+              onClicked: function(mouse) { root.selectCurrency(mouse.button === Qt.RightButton ? -1 : 1) }
+            }
           }
         }
 
@@ -564,6 +714,7 @@ Panel {
 
         // ---- One row per symbol: SYM · name · sparkline · price · change.
         Column {
+          visible: root.activeTab === 0
           width: parent.width
           spacing: 0
 
@@ -659,15 +810,16 @@ Panel {
                 id: rowMouse
                 anchors.fill: parent
                 hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
                 cursorShape: row.valid ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: root.selectQuote(row.index)
+                onClicked: if (row.valid) root.selectQuote(row.index)
               }
             }
           }
         }
 
         Text {
-          visible: root.loading
+          visible: root.activeTab === 0 && root.loading
           leftPadding: Style.space(8)
           text: "Fetching quotes…"
           color: root.mutedForeground
@@ -677,14 +829,14 @@ Panel {
         }
 
         PanelSeparator {
-          visible: root.hasSelection
+          visible: root.activeTab === 0 && root.hasSelection
           foreground: root.barForeground
         }
 
         // ---- Detail block for the selected symbol.
         Column {
           id: detail
-          visible: root.hasSelection
+          visible: root.activeTab === 0 && root.hasSelection
           width: parent.width
           spacing: Style.space(8)
 
@@ -862,7 +1014,7 @@ Panel {
           Text {
             id: yahooLink
             leftPadding: Style.space(8)
-            text: "Open on Yahoo Finance ↗"
+            text: "Open on TradingView ↗"
             color: linkMouse.containsMouse ? root.barForeground : root.mutedForeground
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -873,8 +1025,244 @@ Panel {
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: if (detail.quote) root.openQuotePage(detail.quote.symbol)
+              onClicked: if (detail.quote) root.openTradingView(detail.quote.symbol)
             }
+          }
+        }
+
+        // ---- Screen tab: every current S&P 500 constituent that passed all
+        //      four criteria during the latest daily scan.
+        Column {
+          id: screen
+          visible: root.activeTab === 1
+          width: parent.width
+          spacing: Style.space(5)
+
+          Text {
+            width: parent.width
+            leftPadding: Style.space(8)
+            rightPadding: Style.space(8)
+            text: "S&P 500 · EMA200 ↑ 20D/5Y · Target >20% · Weekly MACD/RSI"
+            elide: Text.ElideRight
+            color: root.mutedForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Item {
+            width: parent.width
+            height: Math.max(screenStamp.implicitHeight, refreshScreenButton.height)
+
+            Text {
+              id: screenStamp
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(8)
+              anchors.right: refreshScreenButton.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.screenAsOf !== ""
+                ? root.screenRows.length + " matches · " + root.screenAsOf + " · USD"
+                : (root.screenLoading ? "Scanning the current S&P 500…" : "No completed scan")
+              elide: Text.ElideRight
+              color: root.mutedForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.italic: true
+            }
+
+            Rectangle {
+              id: refreshScreenButton
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              width: refreshScreenText.implicitWidth + Style.space(12)
+              height: refreshScreenText.implicitHeight + Style.space(6)
+              radius: Style.cornerRadius
+              color: refreshScreenMouse.containsMouse
+                ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
+
+              Text {
+                id: refreshScreenText
+                anchors.centerIn: parent
+                text: root.screenLoading ? "Refreshing…" : "Refresh"
+                color: root.screenLoading ? root.mutedForeground : root.barForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: refreshScreenMouse
+                anchors.fill: parent
+                enabled: !root.screenLoading
+                hoverEnabled: enabled
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.startScreenScan(true)
+              }
+            }
+          }
+
+          Row {
+            id: screenHeader
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            spacing: 0
+
+            Repeater {
+              model: [
+                { text: "Symbol", key: "symbol", width: 50, align: Text.AlignLeft },
+                { text: "Price", key: "price", width: 70, align: Text.AlignRight },
+                { text: "EMA200", key: "ema200", width: 126, align: Text.AlignRight },
+                { text: "MACD", key: "macd", width: 56, align: Text.AlignRight },
+                { text: "RSI", key: "rsi", width: 56, align: Text.AlignRight },
+                { text: "Analysts · Δ", key: "targetUpsidePct", width: 190, align: Text.AlignRight }
+              ]
+
+              Item {
+                required property var modelData
+                required property int index
+                width: index === 5 ? screenHeader.width - Style.space(358) : Style.space(modelData.width)
+                height: headerText.implicitHeight
+
+                Text {
+                  id: headerText
+                  anchors.fill: parent
+                  text: parent.modelData.text + (root.screenSortKey === parent.modelData.key
+                    ? (root.screenSortDirection > 0 ? " ▲" : " ▼") : "")
+                  horizontalAlignment: parent.modelData.align
+                  color: headerMouse.containsMouse ? root.barForeground : root.mutedForeground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                MouseArea {
+                  id: headerMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.sortScreen(parent.modelData.key)
+                }
+              }
+            }
+          }
+
+          Flickable {
+            id: screenList
+            width: parent.width
+            // Keep the panel compact while exposing every qualifying stock
+            // through the mouse wheel or touchpad.
+            height: Math.min(screenRowsColumn.implicitHeight, Style.space(217))
+            contentWidth: width
+            contentHeight: screenRowsColumn.implicitHeight
+            clip: true
+            interactive: contentHeight > height
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            Column {
+              id: screenRowsColumn
+              width: screenList.width
+              spacing: 0
+
+              Repeater {
+                model: root.sortedScreenRows
+
+                Rectangle {
+                id: screenRow
+                required property var modelData
+                width: parent.width
+                height: Style.space(31)
+                radius: Style.cornerRadius
+                color: !modelData.qualifies
+                  ? Qt.rgba(root.downColor.r, root.downColor.g, root.downColor.b, 0.10)
+                  : (screenMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent")
+
+                Row {
+                  id: screenValues
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: 0
+
+                  Text {
+                    width: Style.space(50)
+                    text: screenRow.modelData.symbol
+                    color: root.barForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  Text {
+                    width: Style.space(70)
+                    text: Model.formatPrice(screenRow.modelData.price)
+                    horizontalAlignment: Text.AlignRight
+                    color: root.barForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    width: Style.space(126)
+                    text: Model.formatPrice(screenRow.modelData.ema200)
+                      + " (" + Model.formatSignedPercent(screenRow.modelData.aboveEmaPct) + ")"
+                    horizontalAlignment: Text.AlignRight
+                    color: screenRow.modelData.aboveEma ? root.upColor : root.downColor
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    width: Style.space(56)
+                    text: screenRow.modelData.macd.action
+                    horizontalAlignment: Text.AlignRight
+                    color: root.signalColor(screenRow.modelData.macd.action)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: screenRow.modelData.macd.action !== "Neutral"
+                  }
+                  Text {
+                    width: Style.space(56)
+                    text: screenRow.modelData.rsi.action
+                    horizontalAlignment: Text.AlignRight
+                    color: root.signalColor(screenRow.modelData.rsi.action)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: screenRow.modelData.rsi.action !== "Neutral"
+                  }
+                  Text {
+                    width: screenValues.width - Style.space(358)
+                    text: screenRow.modelData.analystCount + " · "
+                      + Model.formatSignedPercent(screenRow.modelData.targetUpsidePct)
+                    horizontalAlignment: Text.AlignRight
+                    color: screenRow.modelData.targetUpside ? root.upColor : root.downColor
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                MouseArea {
+                  id: screenMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openTradingView(screenRow.modelData.symbol)
+                }
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.screenLoading
+            leftPadding: Style.space(8)
+            text: root.screenLoaded ? "Refreshing the full S&P 500 screen…" : "Running the full S&P 500 screen…"
+            color: root.mutedForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.italic: true
           }
         }
 
@@ -885,11 +1273,18 @@ Panel {
           width: parent.width
           leftPadding: Style.space(8)
           rightPadding: Style.space(8)
-          text: root.fetchError !== ""
-            ? "Could not update: " + root.fetchError
-            : "Click a row for details · Middle-click the tape to refresh · Right-click to pause"
+          text: root.activeTab === 0
+            ? (root.fetchError !== ""
+                ? "Could not update: " + root.fetchError
+                : "Click a row for details · Middle-click the tape to refresh · Right-click to pause")
+            : (root.screenFetchError !== ""
+                ? "Could not update: " + root.screenFetchError + (root.screenRows.length ? " · showing the last successful scan" : "")
+                : (root.screenFetchWarning !== ""
+                    ? "Partial update: " + root.screenFetchWarning
+                    : "All passing stocks are shown · Analysts is coverage count · Δ is target change from current price"))
           wrapMode: Text.WordWrap
-          color: root.fetchError !== "" ? root.urgentForeground : root.mutedForeground
+          color: (root.activeTab === 0 ? root.fetchError : (root.screenFetchError || root.screenFetchWarning)) !== ""
+            ? root.urgentForeground : root.mutedForeground
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
