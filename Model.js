@@ -476,7 +476,8 @@ function screenActionRank(action) {
 function screenSortValue(row, key) {
   if (!row) return null
   if (key === "symbol") return String(row.symbol || "")
-  if (key === "price" || key === "ema200" || key === "analystCount" || key === "targetUpsidePct")
+  if (key === "ema200") return toNumber(row.aboveEmaPct)
+  if (key === "price" || key === "analystCount" || key === "targetUpsidePct")
     return toNumber(row[key])
   if (key === "macd") return screenActionRank(row.macd && row.macd.action)
   if (key === "rsi") return screenActionRank(row.rsi && row.rsi.action)

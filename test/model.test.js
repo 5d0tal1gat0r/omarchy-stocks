@@ -235,15 +235,16 @@ test("screenRows: live price updates price-sensitive checks and matches by symbo
 
 test("sortScreenRows: sorts a copy by screen columns and keeps missing values last", () => {
   const rows = [
-    { symbol: "BBB", price: 20, ema200: 10, analystCount: 3, targetUpsidePct: 5,
+    { symbol: "BBB", price: 20, ema200: 10, aboveEmaPct: 100, analystCount: 3, targetUpsidePct: 5,
       macd: { action: "Sell" }, rsi: { action: "Neutral" } },
-    { symbol: "AAA", price: 30, ema200: 20, analystCount: 8, targetUpsidePct: 25,
+    { symbol: "AAA", price: 30, ema200: 20, aboveEmaPct: 50, analystCount: 8, targetUpsidePct: 25,
       macd: { action: "Buy" }, rsi: { action: "Sell" } },
-    { symbol: "CCC", price: null, ema200: 15, analystCount: 1, targetUpsidePct: null,
+    { symbol: "CCC", price: null, ema200: 15, aboveEmaPct: null, analystCount: 1, targetUpsidePct: null,
       macd: { action: "Neutral" }, rsi: { action: "Buy" } }
   ]
   assert.deepEqual(Model.sortScreenRows(rows, "symbol", 1).map(row => row.symbol), ["AAA", "BBB", "CCC"])
   assert.deepEqual(Model.sortScreenRows(rows, "price", -1).map(row => row.symbol), ["AAA", "BBB", "CCC"])
+  assert.deepEqual(Model.sortScreenRows(rows, "ema200", -1).map(row => row.symbol), ["BBB", "AAA", "CCC"])
   assert.deepEqual(Model.sortScreenRows(rows, "macd", 1).map(row => row.symbol), ["BBB", "CCC", "AAA"])
   assert.deepEqual(Model.sortScreenRows(rows, "rsi", -1).map(row => row.symbol), ["CCC", "BBB", "AAA"])
   assert.deepEqual(rows.map(row => row.symbol), ["BBB", "AAA", "CCC"])
