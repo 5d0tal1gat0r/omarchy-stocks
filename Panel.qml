@@ -39,8 +39,8 @@ Panel {
   property int retries: 0
   property int selectedIndex: 0
 
-  // ---- Chart-series cache for the active range when it is not 1d (the 1d
-  //      series rides along with every quote fetch).
+  // ---- Yahoo chart-series cache for the active range, fetched separately
+  //      from Robinhood's live quote data.
   property var chartSeries: ({})
   property string chartSeriesRange: ""
   property string chartRequestedRange: ""
@@ -81,8 +81,8 @@ Panel {
   // Up/down tints: settings override > theme palette (colors.toml) > fallback.
   property string themeGreen: ""
   property string themeRed: ""
-  readonly property color upColor: upColorSetting !== "" ? upColorSetting : (themeGreen !== "" ? themeGreen : "#5fbf6f")
-  readonly property color downColor: downColorSetting !== "" ? downColorSetting : (themeRed !== "" ? themeRed : urgentForeground)
+  readonly property color upColor: upColorSetting !== "" ? upColorSetting : (themeGreen !== "" ? themeGreen : "#4ccf7a")
+  readonly property color downColor: downColorSetting !== "" ? downColorSetting : (themeRed !== "" ? themeRed : "#ef5b68")
 
   function trendColor(quote) {
     if (Model.isDown(quote)) return downColor
@@ -104,8 +104,10 @@ Panel {
     printErrors: false
     onFileChanged: reload()
     onLoaded: {
-      root.themeGreen = Model.parseThemeColor(text(), "green")
-      root.themeRed = Model.parseThemeColor(text(), "red")
+      var green = Model.parseThemeColor(text(), "green")
+      var red = Model.parseThemeColor(text(), "red")
+      root.themeGreen = Model.isGreenColor(green) ? green : ""
+      root.themeRed = Model.isRedColor(red) ? red : ""
     }
     onLoadFailed: {
       root.themeGreen = ""
@@ -142,7 +144,7 @@ Panel {
 
   function startFetch() {
     if (fetchProc.running) return
-    fetchProc.command = Model.curlCommand(symbols, userAgent, "1d")
+    fetchProc.command = Model.robinhoodQuoteCommand(symbols, userAgent)
     fetchProc.running = true
   }
 
@@ -150,12 +152,12 @@ Panel {
     var raw = String(text || "")
     if (raw.replace(/\s+/g, "") === "") {
       // curl produced nothing (offline, DNS down): keep showing what we had.
-      fetchError = "No response from Yahoo Finance"
+      fetchError = "No response from Robinhood"
       scheduleRetry()
       return
     }
 
-    var parsed = Model.parseQuoteLines(raw, symbols)
+    var parsed = Model.parseRobinhoodQuotes(raw, symbols)
     if (Model.validCount(parsed) === 0) {
       fetchError = parsed.length ? parsed[0].error : "No data"
       // Nothing better to show yet: surface the per-symbol errors as rows.
@@ -223,9 +225,8 @@ Panel {
     retryTimer.restart()
   }
 
-  // ---- Chart series for the non-1d ranges.
+  // ---- Yahoo chart series for all ranges (quote prices come from Robinhood).
   function ensureChartSeries(force) {
-    if (activeRange === "1d") return
     if (!force && chartSeriesRange === activeRange) return
     startChartFetch()
   }
@@ -249,11 +250,9 @@ Panel {
     if (chartRequestedRange !== activeRange) Qt.callLater(root.startChartFetch)
   }
 
-  // 1d series ride along with the (already converted) quote; other ranges
-  // come from the raw chart cache and are converted here.
+  // Chart series are kept in their native currency and converted for display.
   function seriesFor(quote) {
     if (!quote) return []
-    if (activeRange === "1d") return quote.series || []
     var raw = chartSeries[quote.symbol] || []
     return Model.convertSeries(raw, Model.rateFor(quote.nativeCurrency || quote.currency, displayCurrency, rates))
   }
@@ -473,6 +472,34 @@ Panel {
             font.bold: true
           }
 
+          Rectangle {
+            id: refreshChip
+            anchors.left: headerTitle.right
+            anchors.leftMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            width: refreshText.implicitWidth + Style.space(10)
+            height: refreshText.implicitHeight + Style.space(6)
+            radius: Style.cornerRadius
+            color: refreshMouse.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
+
+            Text {
+              id: refreshText
+              anchors.centerIn: parent
+              text: "↻"
+              color: root.mutedForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            MouseArea {
+              id: refreshMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.refresh()
+            }
+          }
+
           Row {
             id: chips
             anchors.horizontalCenter: parent.horizontalCenter
@@ -576,10 +603,8 @@ Panel {
               required property int index
               readonly property bool valid: Model.isValid(modelData)
               readonly property bool selected: index === root.selectedIndex && root.hasSelection
-              readonly property var series: root.activeRange === "1d"
-                ? (modelData.series || [])
-                : Model.convertSeries(root.chartSeries[modelData.symbol] || [],
-                    Model.rateFor(modelData.nativeCurrency || modelData.currency, root.displayCurrency, root.rates))
+              readonly property var series: Model.convertSeries(root.chartSeries[modelData.symbol] || [],
+                Model.rateFor(modelData.nativeCurrency || modelData.currency, root.displayCurrency, root.rates))
 
               width: parent.width
               height: symbolText.implicitHeight + Style.space(14)
@@ -887,7 +912,7 @@ Panel {
           rightPadding: Style.space(8)
           text: root.fetchError !== ""
             ? "Could not update: " + root.fetchError
-            : "Click a row for details · Middle-click the tape to refresh · Right-click to pause"
+            : "Click a row for details · Click ↻ to refresh · Right-click the tape to pause"
           wrapMode: Text.WordWrap
           color: root.fetchError !== "" ? root.urgentForeground : root.mutedForeground
           font.family: root.fontFamily
