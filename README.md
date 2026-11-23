@@ -3,7 +3,9 @@
 A Wall-Street-style ticker tape for the Omarchy Quattro bar. The tape scrolls
 your symbols (`AAPL 305.59 ▲0.42%  •  NVDA …`) in the theme's green/red; click
 it for a panel with sparklines, a detail chart with range selector, key stats
-and a currency switch. Quotes and FX rates come from Yahoo Finance — no API key.
+and a currency switch. Live quote prices come from Robinhood, including its
+latest non-regular-hours trade when newer than the last regular-hours trade.
+Historical charts and FX conversion rates come from Yahoo Finance.
 
 ![preview](preview.png)
 
@@ -48,7 +50,7 @@ omarchy bar set io.github.5d0tal1gat0r.stocks compact true --json    # "AAPL ▲
 
 | key | default | meaning |
 |-----|---------|---------|
-| `symbols` | `["AAPL","NVDA","SPCX","GOOGL"]` | any Yahoo Finance symbols (stocks, ETFs, `BTC-USD`, `EURUSD=X`, `^GSPC`); a comma-separated string also works |
+| `symbols` | `["AAPL","NVDA","SPCX","GOOGL"]` | Robinhood-supported stock symbols; a comma-separated string also works |
 | `refreshMinutes` | `5` | quote refresh interval (minimum 1) |
 | `tickerWidth` | `180` | tape width in px (minimum 80) |
 | `scrollSpeed` | `20` | tape speed in px/s; `0` = static |
@@ -58,9 +60,12 @@ omarchy bar set io.github.5d0tal1gat0r.stocks compact true --json    # "AAPL ▲
 | `currencies` | `["USD","EUR","GBP","JPY","CHF"]` | what the currency chip cycles through |
 | `upColor` / `downColor` | theme `green` / `red` | override the tints with a hex color, e.g. `"#a6e3a1"` |
 
-Unknown symbols show as `Not Found` in the panel and are left out of the tape.
-Colors follow the current theme's `colors.toml`; themes without a `green` get a
-neutral fallback.
+Symbols without Robinhood quotes show an error in the panel and are left out
+of the tape. Colors follow the current theme's `colors.toml`; themes without a
+`green` get a neutral fallback.
+
+The quote endpoint may not return every symbol supported by Yahoo Finance.
+Chart history and currency conversion still use Yahoo Finance.
 
 ## Develop
 

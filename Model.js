@@ -48,6 +48,7 @@ function cycleSeconds(value, fallback) {
 
 var CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 var QUOTE_PAGE_URL = "https://finance.yahoo.com/quote/"
+var ROBINHOOD_QUOTES_URL = "https://api.robinhood.com/quotes/?symbols="
 
 // Panel chart ranges and the Yahoo bar interval that keeps each one at a
 // sensible point count (79 / 131 / 21 / 125 / 53 points respectively).
@@ -64,8 +65,8 @@ function chartInterval(range) {
   return CHART_INTERVALS[range] || "1d"
 }
 
-// The quote fetch always uses range=1d (previousClose there is the prior
-// session's close); other ranges are only used for chart series.
+// Yahoo Finance supplies historical chart series; live quote prices come
+// from Robinhood's quote endpoint below.
 function chartUrl(symbol, range) {
   var r = chartRange(range)
   return CHART_URL + encodeURIComponent(String(symbol)) + "?range=" + r + "&interval=" + chartInterval(r)
@@ -94,6 +95,14 @@ function curlCommand(symbols, userAgent, range) {
   var cmd = ["curl", "-sS", "--max-time", "10", "-A", String(userAgent || "omarchy-stocks"), "-w", "\n"]
   for (var i = 0; i < symbols.length; i++) cmd.push(chartUrl(symbols[i], range))
   return cmd
+}
+
+function robinhoodQuotesUrl(symbols) {
+  return ROBINHOOD_QUOTES_URL + encodeURIComponent((symbols || []).join(","))
+}
+
+function robinhoodQuoteCommand(symbols, userAgent) {
+  return ["curl", "-sS", "--max-time", "10", "--max-filesize", "1048576", "-A", String(userAgent || "omarchy-stocks"), "-H", "Accept: application/json", robinhoodQuotesUrl(symbols)]
 }
 
 function quoteUrl(symbol) {
@@ -241,6 +250,61 @@ function parseQuoteLines(text, symbols) {
     if (!quote && positional && byIndex[j] && byIndex[j].error) quote = byIndex[j]
     if (!quote) quote = emptyQuote(symbol, "No data")
     quote.symbol = symbol
+    out.push(quote)
+  }
+  return out
+}
+
+function quoteTimestamp(value) {
+  if (!value) return null
+  var milliseconds = Date.parse(String(value))
+  return isNaN(milliseconds) ? null : milliseconds / 1000
+}
+
+// Robinhood's quote endpoint reports regular-hours and non-regular-hours
+// trades separately. Use whichever trade has the newer venue timestamp.
+function parseRobinhoodQuotes(text, symbols) {
+  var data
+  try {
+    data = JSON.parse(String(text || ""))
+  } catch (e) {
+    return (symbols || []).map(function(symbol) { return emptyQuote(symbol, "Bad Robinhood response") })
+  }
+
+  var results = data && Array.isArray(data.results) ? data.results : []
+  var bySymbol = {}
+  for (var i = 0; i < results.length; i++) {
+    if (results[i] && results[i].symbol) bySymbol[String(results[i].symbol).toUpperCase()] = results[i]
+  }
+
+  var out = []
+  for (var j = 0; j < symbols.length; j++) {
+    var symbol = String(symbols[j]).toUpperCase()
+    var raw = bySymbol[symbol]
+    if (!raw) {
+      out.push(emptyQuote(symbol, "No Robinhood quote"))
+      continue
+    }
+
+    var regularPrice = toNumber(raw.last_trade_price)
+    var nonRegularPrice = toNumber(raw.last_non_reg_trade_price)
+    var regularTime = quoteTimestamp(raw.venue_last_trade_time)
+    var nonRegularTime = quoteTimestamp(raw.venue_last_non_reg_trade_time)
+    var useNonRegular = nonRegularPrice !== null && (regularPrice === null ||
+      (nonRegularTime !== null && (regularTime === null || nonRegularTime > regularTime)))
+    var price = useNonRegular ? nonRegularPrice : regularPrice
+    var marketTime = useNonRegular ? nonRegularTime : regularTime
+    var previousClose = toNumber(raw.previous_close)
+    var change = price !== null && previousClose !== null ? price - previousClose : null
+    var quote = emptyQuote(symbol, price === null ? "No Robinhood price" : "")
+    quote.currency = "USD"
+    quote.exchange = "Robinhood"
+    quote.price = price
+    quote.prevClose = previousClose
+    quote.change = change
+    quote.changePct = change !== null && previousClose ? change / previousClose * 100 : null
+    quote.marketTime = marketTime
+    quote.volume = toNumber(raw.volume)
     out.push(quote)
   }
   return out
@@ -455,6 +519,36 @@ function parseThemeColor(tomlText, key) {
   return ""
 }
 
+function colorHue(value) {
+  var color = normalizeColor(value)
+  if (color === "") return null
+  var hex = color.slice(1)
+  if (hex.length === 3) hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2)
+  if (hex.length === 8) hex = hex.slice(0, 6)
+  var r = parseInt(hex.slice(0, 2), 16) / 255
+  var g = parseInt(hex.slice(2, 4), 16) / 255
+  var b = parseInt(hex.slice(4, 6), 16) / 255
+  var max = Math.max(r, g, b)
+  var min = Math.min(r, g, b)
+  var delta = max - min
+  if (delta === 0) return null
+  var hue
+  if (max === r) hue = 60 * (((g - b) / delta) % 6)
+  else if (max === g) hue = 60 * ((b - r) / delta + 2)
+  else hue = 60 * ((r - g) / delta + 4)
+  return hue < 0 ? hue + 360 : hue
+}
+
+function isGreenColor(value) {
+  var hue = colorHue(value)
+  return hue !== null && hue >= 75 && hue <= 165
+}
+
+function isRedColor(value) {
+  var hue = colorHue(value)
+  return hue !== null && (hue <= 25 || hue >= 335)
+}
+
 function formatVolume(value) {
   var n = toNumber(value)
   if (n === null) return ""
@@ -608,11 +702,14 @@ if (typeof module !== "undefined") {
     cycleSeconds: cycleSeconds,
     chartUrl: chartUrl,
     curlCommand: curlCommand,
+    robinhoodQuotesUrl: robinhoodQuotesUrl,
+    robinhoodQuoteCommand: robinhoodQuoteCommand,
     quoteUrl: quoteUrl,
     shellQuote: shellQuote,
     emptyQuote: emptyQuote,
     parseChartResponse: parseChartResponse,
     parseQuoteLines: parseQuoteLines,
+    parseRobinhoodQuotes: parseRobinhoodQuotes,
     isValid: isValid,
     isDown: isDown,
     isUp: isUp,
@@ -638,6 +735,8 @@ if (typeof module !== "undefined") {
     tapeItems: tapeItems,
     normalizeColor: normalizeColor,
     parseThemeColor: parseThemeColor,
+    isGreenColor: isGreenColor,
+    isRedColor: isRedColor,
     formatVolume: formatVolume,
     DEFAULT_CURRENCIES: DEFAULT_CURRENCIES,
     normalizeCurrency: normalizeCurrency,
